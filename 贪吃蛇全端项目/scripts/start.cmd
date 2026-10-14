@@ -3,8 +3,13 @@ rem ============================================================
 rem  start.cmd   一键启动（MySQL检查 + 后端 + 前端）
 rem ------------------------------------------------------------
 rem  用法：双击本文件即可。
-rem  顺序：1.检查MySQL  2.检查8080是否已占用  3.编译后端+拷贝依赖
-rem        4.启动后端  5.启动前端  6.打开浏览器
+rem  顺序：1.检查MySQL  2.数据库备份自检(自动快照)  3.检查8080占用
+rem        4.编译后端并启动  5.启动前端  6.打开浏览器
+rem
+rem  第 2 步调用 db-backup\auto-backup.cmd（独立备份仓，见 db-backup\README.md）：
+rem    有数据且与上次快照不同 -> 自动存一份到 db-backup\snapshots\auto
+rem    数据被清空但备份仓有历史备份 -> 大字警告，提示跑 restore-db.cmd
+rem    这一步绝不能挡住启动，所以那边所有异常都静默处理。
 rem
 rem  2026-10-10 重要修复：
 rem    旧版用 start ... cmd /k "set /p CP=<cp.txt & java ... %%CP%%"
@@ -36,7 +41,7 @@ if not defined NODE      ( echo [错误] 没找到 Node，无法启动前端。 & pause & exi
 rem ------------------------------------------------------------
 rem  1. 检查 MySQL
 rem ------------------------------------------------------------
-echo [1/5] 检查 MySQL 数据库 ...
+echo [1/6] 检查 MySQL 数据库 ...
 netstat -an | findstr /r /c:":3306 .*LISTENING" >nul 2>&1
 if errorlevel 1 (
   echo       3306 端口没在监听，MySQL 可能没启动。
@@ -56,9 +61,15 @@ if errorlevel 1 (
 )
 
 rem ------------------------------------------------------------
-rem  2. 检查后端端口
+rem  2. 数据库备份自检 + 自动快照（db-backup 独立备份仓）
 rem ------------------------------------------------------------
-echo [2/5] 检查后端端口 8080 ...
+echo [2/6] 数据库备份自检 ...
+call "%ROOT%\db-backup\auto-backup.cmd"
+
+rem ------------------------------------------------------------
+rem  3. 检查后端端口
+rem ------------------------------------------------------------
+echo [3/6] 检查后端端口 8080 ...
 set "BACKEND_RUNNING=0"
 netstat -an | findstr /r /c:":8080 .*LISTENING" >nul 2>&1
 if not errorlevel 1 (
@@ -71,7 +82,7 @@ if "!BACKEND_RUNNING!"=="0" (
   rem  3. 编译后端 + 拷贝依赖到 target\lib
   rem     每次开机 target 都会被删掉，所以必须重新编译
   rem ----------------------------------------------------------
-  echo [3/5] 编译后端（首次或清理后需要一点时间）...
+  echo [4/6] 编译后端（首次或清理后需要一点时间）...
   pushd "%BACKEND%"
   call "%MVN%" -o -q clean compile > "%ROOT%\scripts\backend-build.log" 2>&1
   if errorlevel 1 (
@@ -134,7 +145,7 @@ rem ------------------------------------------------------------
 rem  5. 前端
 rem     缺 node_modules 时自动 npm install（开机重置后必然缺）
 rem ------------------------------------------------------------
-echo [4/5] 准备前端 ...
+echo [5/6] 准备前端 ...
 if not exist "%FRONTEND%\node_modules" (
   echo       没找到 node_modules，正在执行 npm install（需要联网，稍等）...
   pushd "%FRONTEND%"
@@ -168,7 +179,7 @@ if "!FRONTEND_UP!"=="1" ( echo       前端已就绪 [OK] ) else ( echo       [警告] 
 rem ------------------------------------------------------------
 rem  6. 打开浏览器
 rem ------------------------------------------------------------
-echo [5/5] 打开浏览器 ...
+echo [6/6] 打开浏览器 ...
 start "" "http://127.0.0.1:5173/"
 
 echo ------------------------------------------------------------
@@ -177,6 +188,11 @@ echo     前端页面 : http://127.0.0.1:5173/
 echo     后端接口 : http://127.0.0.1:8080/api/user/login
 echo     测试账号 : admin / 123456
 echo   停止服务 : 关闭两个新开的窗口，或运行 stop.cmd
+echo ------------------------------------------------------------
+echo   数据备份 : db-backup  （独立备份仓，启动时已自动快照）
+echo     手动备份 : db-backup\backup-db.cmd
+echo     恢复数据 : db-backup\restore-db.cmd   （开机数据被清后跑这个）
+echo     查看状态 : db-backup\list-backups.cmd
 echo ============================================================
 echo.
 pause

@@ -80,4 +80,9 @@ public class UserService {
         wrapper.eq("username", username);
         return userMapper.selectOne(wrapper);
     }
+
+    /** 按主键查用户（保存对局记录时用来核对用户名） */
+    public User findById(Long id) {
+        return id == null ? null : userMapper.selectById(id);
+    }
 }

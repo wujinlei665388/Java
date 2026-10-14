@@ -36,6 +36,46 @@ CREATE TABLE IF NOT EXISTS `user` (
 -- 默认测试账号：admin / 123456
 INSERT IGNORE INTO `user` (`username`, `password`) VALUES ('admin', '123456');
 
+-- ============================================================
+--  对局记录表 game_record
+--  「每局结束后由玩家决定是否保存」——玩家点了保存才会插一条，
+--  不点就不写。user.score 是历史最高分，这张表是每一局的流水。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `game_record` (
+  `id`          BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `user_id`     BIGINT      DEFAULT NULL COMMENT '用户 id（关联 user.id，可为空）',
+  `username`    VARCHAR(20) NOT NULL COMMENT '用户名（冗余一份，方便直接查）',
+  `score`       INT         NOT NULL DEFAULT 0 COMMENT '本局得分',
+  `snake_len`   INT         NOT NULL DEFAULT 3 COMMENT '本局结束时蛇的长度',
+  `food_count`  INT         NOT NULL DEFAULT 0 COMMENT '本局吃掉的食物个数',
+  `map_id`      VARCHAR(20) NOT NULL DEFAULT '' COMMENT '地图标识 forest/neon/ice',
+  `map_name`    VARCHAR(40) NOT NULL DEFAULT '' COMMENT '地图中文名',
+  `skin_id`     VARCHAR(20) NOT NULL DEFAULT '' COMMENT '皮肤标识',
+  `skin_name`   VARCHAR(40) NOT NULL DEFAULT '' COMMENT '皮肤中文名',
+  `duration`    INT         NOT NULL DEFAULT 0 COMMENT '本局时长（秒，不含暂停）',
+  `create_time` DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '保存时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_user_time` (`user_id`, `create_time`),
+  KEY `idx_user_score` (`user_id`, `score`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='对局记录表（玩家主动保存的每一局）';
+
+-- ============================================================
+--  对局回放轨迹表 game_replay
+--  和 game_record 一对一（record_id 即主键，可缺省）。
+--  单独一张表而不是给 game_record 加列，是为了：
+--    1) 建表幂等，老库不用 ALTER 就能升级（MySQL 8 没有
+--       ADD COLUMN IF NOT EXISTS，加列做不到幂等）；
+--    2) 轨迹动辄几十 KB，列表查询不会连带捞出来。
+--  没有这一行的对局 = 保存时还没录轨迹，前端显示"这局没存回放"。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `game_replay` (
+  `record_id`   BIGINT     NOT NULL COMMENT '关联 game_record.id',
+  `data`        MEDIUMTEXT NOT NULL COMMENT '回放轨迹（前端紧凑编码后的 JSON 文本）',
+  `steps`       INT        NOT NULL DEFAULT 0 COMMENT '总步数，列表里显示用',
+  `create_time` DATETIME   NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间',
+  PRIMARY KEY (`record_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='对局回放轨迹（一局一行，可缺省）';
+
 -- ------------------------------------------------------------
 --  常用查询（方便你在 Navicat / 命令行里手查）
 -- ------------------------------------------------------------
@@ -47,3 +87,9 @@ INSERT IGNORE INTO `user` (`username`, `password`) VALUES ('admin', '123456');
 -- INSERT INTO `user` (`username`,`password`) VALUES ('player1','abc123');
 -- 手动改最高分
 -- UPDATE `user` SET score = 999 WHERE username = 'player1';
+-- 某个玩家保存过的对局（按时间倒序）
+-- SELECT id, score, snake_len, map_name, skin_name, duration, create_time
+--   FROM `game_record` WHERE username = 'admin' ORDER BY create_time DESC;
+-- 谁的得分最高（对局流水维度，和排行榜的最高分不是一回事）
+-- SELECT username, MAX(score) AS best, COUNT(*) AS games
+--   FROM `game_record` GROUP BY username ORDER BY best DESC LIMIT 10;

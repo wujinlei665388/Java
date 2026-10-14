@@ -11,10 +11,12 @@
         <a @click.prevent="to('skins')">皮 肤</a>
         <a @click.prevent="to('how')">玩 法</a>
         <a @click.prevent="to('rank')">排行榜</a>
+        <a class="nav-space" @click.prevent="$router.push('/my')">我的空间</a>
       </nav>
       <div class="nav-right">
         <template v-if="user">
           <span class="who">玩家 <b>{{ user }}</b></span>
+          <button class="btn ghost sm" @click="openRecords">我的对局</button>
           <button class="btn ghost sm" @click="logout">退出</button>
         </template>
         <template v-else>
@@ -94,7 +96,8 @@
         </div>
         <div class="skin-note">
           当前组合：<b>{{ map.name }}</b> + <b>{{ skin.name }}</b><br>
-          皮肤只改外观（配色 · 底板图案 · 蛇与食物的造型），地图的障碍、穿越边界、速度、分值都不受影响。
+          皮肤只改外观（配色 · 底板图案 · 蛇与食物的造型），地图的障碍、穿越边界、速度、分值都不受影响。<br>
+          想看每款皮肤跑起来是什么样，去<a class="note-link" @click.prevent="$router.push('/my')">「我的空间 · 皮肤库」</a>—— 那里的试衣间会让一条蛇一直演示给你看。
         </div>
       </section>
 
@@ -119,6 +122,14 @@
               <li>吃一个食物得分，三张地图分值不同（10 / 15 / 12）</li>
               <li>吃得越多蛇越长、速度越快（最快 70ms 一步）</li>
               <li>只有超过历史最高分才会写进数据库</li>
+            </ul>
+          </div>
+          <div class="how-card">
+            <h4>保存对局</h4>
+            <ul>
+              <li>每局结束会问你「保存本局 / 不保存」，点保存才留档</li>
+              <li>保存时连这一局的走位一起录下来，之后能像录像一样重放</li>
+              <li>都收在「我的空间 · 对局回放」里，能重看也能删除</li>
             </ul>
           </div>
           <div class="how-card">
@@ -166,13 +177,14 @@
 
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import BgSnake from '../components/BgSnake.vue'
 import { MAPS, GRID, getMap, loadMapId, saveMapId } from '../game/maps'
 import { SKINS, getSkin, resolveTheme, loadSkinId, saveSkinId } from '../game/skins'
 import { paintPreview } from '../game/render'
 import { getRank } from '../api/user'
 
+const route = useRoute()
 const router = useRouter()
 const maps = MAPS
 const skins = SKINS
@@ -248,6 +260,11 @@ function to(id) {
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+/** 我的对局：对局记录和回放都收进「我的空间」了，跳过去并直接落在那一栏 */
+function openRecords() {
+  router.push({ path: '/my', query: { tab: 'records' } })
+}
+
 function logout() {
   sessionStorage.removeItem('snake_user')
   sessionStorage.removeItem('snake_uid')
@@ -259,6 +276,13 @@ onMounted(async () => {
   await nextTick()
   paintMapThumbs()
   paintSkinThumbs()
+
+  // 从「我的空间」的导航点「地图 / 玩法」跳回来时，直接滚到对应区块
+  if (route.query.to) {
+    const target = String(route.query.to)
+    setTimeout(() => to(target), 80)
+    router.replace({ path: '/' })
+  }
 
   const res = await getRank(5)
   if (res.code === 200) {
@@ -339,6 +363,16 @@ onMounted(async () => {
 }
 
 .nav-links a:hover {
+  color: #facc15;
+  text-shadow: 0 0 8px rgba(250, 204, 21, 0.7);
+}
+
+/* 「我的空间」是一个独立页面，用紫色和本页的锚点链接区分开 */
+.nav-links a.nav-space {
+  color: #a78bfa;
+}
+
+.nav-links a.nav-space:hover {
   color: #facc15;
   text-shadow: 0 0 8px rgba(250, 204, 21, 0.7);
 }
@@ -713,6 +747,16 @@ onMounted(async () => {
 .skin-note b {
   color: #facc15;
   font-weight: normal;
+}
+
+.note-link {
+  color: #facc15;
+  cursor: pointer;
+  border-bottom: 1px solid #166534;
+}
+
+.note-link:hover {
+  text-shadow: 0 0 8px rgba(250, 204, 21, 0.7);
 }
 
 /* ---------------- 玩法 ---------------- */

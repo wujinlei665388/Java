@@ -5,6 +5,8 @@
       <span class="topbar-right">
         <a class="home-link" @click.prevent="$router.push('/')">首页</a>
         <a class="skin-link" @click.prevent="showSkin = true">皮肤：{{ skin.name }}</a>
+        <a class="record-link" @click.prevent="$router.push('/my?tab=records')">我的对局</a>
+        <a class="space-link" @click.prevent="$router.push('/my')">我的空间</a>
         <a class="rank-link" @click.prevent="openRank">排行榜</a>
         <a class="logout" @click.prevent="logout">退出登录 &gt;&gt;</a>
       </span>
@@ -34,7 +36,19 @@
       <div class="overlay" v-show="!running || paused || gameOver">
         <h2 :class="overlayClass">{{ overlayTitle }}</h2>
         <p v-html="overlayText"></p>
-        <button class="btn" @click="start">{{ gameOver ? '再来一局' : (paused ? '继续游戏' : '开始游戏') }}</button>
+
+        <!-- 本局结束：要不要把这局存下来，由玩家自己决定 -->
+        <div class="overlay-btns" v-if="gameOver">
+          <button class="btn" :disabled="saving || saved" @click="saveCurrentRecord">
+            {{ saved ? '已保存 ✓' : (saving ? '保存中…' : '保 存 本 局') }}
+          </button>
+          <button class="btn ghost" @click="start">
+            {{ saved ? '再 来 一 局' : '不保存 · 再来一局' }}
+          </button>
+        </div>
+        <button class="btn" v-else @click="start">{{ paused ? '继续游戏' : '开始游戏' }}</button>
+
+        <div class="overlay-tip" v-if="overlayTip" :class="{ err: !saved && saveMsg }">{{ overlayTip }}</div>
       </div>
     </div>
 
@@ -81,6 +95,7 @@
         <button class="btn small" @click="showRank = false">关 闭</button>
       </div>
     </div>
+
   </div>
 </template>
 
@@ -88,6 +103,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { saveScore, getRank } from '../api/user'
+import { saveRecord } from '../api/record'
 import {
   MAPS, GRID, getMap, wallSet, loadMapId, saveMapId
 } from '../game/maps'
@@ -95,6 +111,7 @@ import {
   SKINS, getSkin, resolveTheme, loadSkinId, saveSkinId
 } from '../game/skins'
 import { paintBoard, drawFood, drawSnake } from '../game/render'
+import { createRecorder, encodeTrack } from '../game/replay'
 
 const route = useRoute()
 const router = useRouter()
@@ -160,9 +177,40 @@ const rankMsg = ref('')
 const showSkin = ref(false)
 let frame = 0 // 帧计数，彩虹皮肤的色相靠它流动
 
+// 本局是否已经存下来：saved 之后按钮锁住，防止同一局重复保存
+const saved = ref(false)
+const saving = ref(false)
+const saveMsg = ref('')
+// 本局有没有录到轨迹（录到了，存完就能在「我的空间 · 对局回放」里重放）
+const hasReplayData = ref(false)
+
+const overlayTip = computed(() => {
+  if (!gameOver.value) return ''
+  if (saved.value) {
+    return saveMsg.value || (hasReplayData.value
+      ? '本局已保存 ✓ 在「我的空间 · 对局回放」里能重放这一局'
+      : '本局已保存 ✓')
+  }
+  return saveMsg.value || '存下来的对局可以在「我的空间 · 对局回放」里重放'
+})
+
 const SIZE = 400
 const CELL = SIZE / GRID
 let ctx, snake, dir, nextDir, food, speed, timer = null
+
+/* ---------- 本局计时与计数（保存对局时要一起带上） ---------- */
+let playStartAt = 0   // 本局开始的时间戳（每次开局重置）
+let pauseStartAt = 0  // 当前这一次暂停开始的时间戳，0 表示没在暂停
+let pausedMs = 0      // 本局累计暂停了多久，算时长时要扣掉
+let lastDuration = 0  // 本局结束时的净时长（秒）
+let foodsEaten = 0    // 本局吃掉的食物个数
+
+/* ---------- 回放录制 ----------
+ * 每开一局就新建一个录制器，tick() 里记一步。
+ * 存的时候才编码成字符串发给后端；不存的话这些数据随页面一起丢掉。
+ * 注意只记"蛇头走过的格子 + 食物顺序"，整条蛇靠这些就能重建出来。
+ */
+let recorder = null
 
 /** 皮肤面板里那三个小色块：蛇身 / 蛇头 / 食物 */
 function swatch(s) {
@@ -192,6 +240,63 @@ async function openRank() {
   showRank.value = true
   rankMsg.value = '加载中...'
   await loadRank()
+}
+
+/* ---------------- 对局保存与「我的对局」 ---------------- */
+
+/** 秒数转成人话：95 秒 / 3 分 20 秒 / 1 时 05 分 */
+function fmtDuration(sec) {
+  const v = Number(sec) || 0
+  if (v < 60) return v + ' 秒'
+  const m = Math.floor(v / 60)
+  const s = v % 60
+  if (m < 60) return s ? `${m} 分 ${s} 秒` : `${m} 分`
+  return `${Math.floor(m / 60)} 时 ${m % 60} 分`
+}
+
+/** 本局净时长（秒）：把暂停的那段时间扣掉 */
+function playedSeconds() {
+  if (!playStartAt) return 0
+  const pausedNow = pauseStartAt ? Date.now() - pauseStartAt : 0
+  return Math.max(0, Math.round((Date.now() - playStartAt - pausedMs - pausedNow) / 1000))
+}
+
+/**
+ * 保存本局 —— 只有玩家点了「保存本局」才会走到这里，不点就什么都不写库
+ * 顺便把这一局的走位轨迹一起送上去，之后在「我的空间 · 对局回放」里能重看
+ */
+async function saveCurrentRecord() {
+  if (saving.value || saved.value) return
+  saving.value = true
+  saveMsg.value = ''
+
+  const track = recorder ? recorder.build() : null
+  const replay = track ? encodeTrack(track) : ''
+  hasReplayData.value = !!replay
+
+  const res = await saveRecord({
+    userId: userId || null,
+    username: user,
+    score: score.value,
+    snakeLen: snakeLen.value,
+    foodCount: foodsEaten,
+    mapId: mapId.value,
+    mapName: map.value.name,
+    skinId: skinId.value,
+    skinName: skin.value.name,
+    duration: lastDuration,
+    replay,
+    replaySteps: track ? track.steps : 0
+  })
+  saving.value = false
+  if (res.code === 200) {
+    saved.value = true
+    saveMsg.value = hasReplayData.value
+      ? '本局已保存 ✓ 去「我的空间 · 对局回放」就能重看这一局'
+      : '本局已保存 ✓'
+  } else {
+    saveMsg.value = res.msg || '保存失败，请确认后端已启动'
+  }
 }
 
 /* 把本局分数同步到后端数据库（后端只在更大时才更新） */
@@ -230,7 +335,27 @@ function reset() {
   paused.value = false
   overlayTitle.value = 'READY?'
   overlayText.value = readyText()
+  // 新的一局：清空上一局的"存/不存"状态，否则按钮会一直是灰的
+  saved.value = false
+  saving.value = false
+  saveMsg.value = ''
+  foodsEaten = 0
+  lastDuration = 0
+  // 计时归零；真正开局时 start() 会用当前时间戳重新开始计时
+  playStartAt = 0
+  pauseStartAt = 0
+  pausedMs = 0
   placeFood()
+  // 录制器要在食物就位之后再建：开局那个食物也是轨迹的一部分
+  recorder = createRecorder({
+    grid: GRID,
+    mapId: mapId.value,
+    skinId: skinId.value,
+    snake,
+    food,
+    stepMs: map.value.rules.speed
+  })
+  hasReplayData.value = false
   updateHud()
   draw()
 }
@@ -251,8 +376,12 @@ function die() {
   pushScore()
   updateHud()
   draw()
+  // 定格本局时长，后面点「保存本局」时直接用这个值
+  lastDuration = playedSeconds()
+  pauseStartAt = 0
   overlayTitle.value = 'GAME OVER'
-  overlayText.value = `${map.value.name} · 本局得分：${score.value}<br>历史最高分：${best}`
+  overlayText.value = `${map.value.name} · 本局得分：${score.value}<br>`
+    + `吃掉 ${foodsEaten} 个食物 · 用时 ${fmtDuration(lastDuration)}<br>历史最高分：${best}`
 }
 
 function tick() {
@@ -275,6 +404,7 @@ function tick() {
 
   if (head.x === food.x && head.y === food.y) {
     score.value += map.value.rules.foodScore
+    foodsEaten++
     placeFood()
     const r = map.value.rules
     if (speed > r.minSpeed) {
@@ -285,6 +415,8 @@ function tick() {
   } else {
     snake.pop()
   }
+  // 记一步回放：走到了哪一格 + 此刻食物在哪（吃到的话这里已经是新食物了）
+  if (recorder) recorder.push(head, food)
   updateHud()
   draw()
 }
@@ -302,12 +434,21 @@ function draw() {
 
 function start() {
   if (paused.value && !gameOver.value) {
+    // 从暂停回到游戏：把这段暂停的时间记下来，最后算时长时扣掉
     paused.value = false
+    if (pauseStartAt) {
+      pausedMs += Date.now() - pauseStartAt
+      pauseStartAt = 0
+    }
     return
   }
   score.value = 0
   reset()
   running.value = true
+  // 重置本局计时器
+  playStartAt = Date.now()
+  pauseStartAt = 0
+  pausedMs = 0
   clearInterval(timer)
   timer = setInterval(tick, speed)
 }
@@ -331,8 +472,12 @@ function onKey(e) {
     if (!running.value) return
     paused.value = !paused.value
     if (paused.value) {
+      pauseStartAt = Date.now()
       overlayTitle.value = 'PAUSED'
       overlayText.value = '按 空格键 继续'
+    } else if (pauseStartAt) {
+      pausedMs += Date.now() - pauseStartAt
+      pauseStartAt = 0
     }
     return
   }
@@ -356,6 +501,11 @@ onMounted(() => {
   ctx = game.value.getContext('2d')
   reset()
   document.addEventListener('keydown', onKey)
+  // 老链接可能还带着 ?panel=records（那会儿对局面板还挂在游戏页上）。
+  // 现在对局统一收到「我的空间」了，遇到这种地址直接把人送过去。
+  if (route.query.panel === 'records') {
+    router.replace({ path: '/my', query: { tab: 'records' } })
+  }
 })
 
 onBeforeUnmount(() => {
@@ -428,6 +578,24 @@ onBeforeUnmount(() => {
 
 .topbar .skin-link:hover {
   text-shadow: 0 0 8px rgba(250, 204, 21, 0.8);
+}
+
+.topbar .record-link {
+  color: #38bdf8;
+  cursor: pointer;
+}
+
+.topbar .record-link:hover {
+  text-shadow: 0 0 8px rgba(56, 189, 248, 0.8);
+}
+
+.topbar .space-link {
+  color: #a78bfa;
+  cursor: pointer;
+}
+
+.topbar .space-link:hover {
+  text-shadow: 0 0 8px rgba(167, 139, 250, 0.8);
 }
 
 /* ---- 皮肤弹层 ---- */
@@ -595,6 +763,45 @@ onBeforeUnmount(() => {
   padding: 8px 22px;
   font-size: 13px;
 }
+
+/* ---- 游戏结束时的「保存本局 / 不保存」按钮组 ---- */
+.overlay-btns {
+  display: flex;
+  gap: 12px;
+}
+
+.btn.ghost {
+  background: transparent;
+  color: var(--text, #4ade80);
+  border: 2px solid var(--muted, #166534);
+  box-shadow: none;
+}
+
+.btn.ghost:hover {
+  background: transparent;
+  color: #facc15;
+  border-color: #facc15;
+  box-shadow: 0 0 12px rgba(250, 204, 21, 0.35);
+}
+
+.btn:disabled {
+  cursor: default;
+  opacity: 0.75;
+  background: #a3e635;
+  box-shadow: 0 0 10px rgba(163, 230, 53, 0.5);
+}
+
+.overlay-tip {
+  max-width: 320px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: #38bdf8;
+}
+
+.overlay-tip.err {
+  color: #f87171;
+}
+
 
 h1 {
   letter-spacing: 6px;
