@@ -1,0 +1,27 @@
+/* 贪吃蛇主题全局样式 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  font-family: 'Courier New', 'Consolas', monospace;
+  background: #0b1a0f;
+  color: #4ade80;
+  overflow: hidden;
+}
+
+#app {
+  height: 100%;
+}
+
+input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px #0b1a0f inset;
+  -webkit-text-fill-color: #4ade80;
+}
